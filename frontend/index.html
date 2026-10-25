@@ -1130,14 +1130,24 @@ let state = null;
 let prevCells = null;
 
 // Determine backend base URL:
-// - If user saved a custom URL in localStorage, use it.
-// - If page is served from http://localhost:8080 (the C++ server), use '' (relative path).
-// - If page is opened directly as file:// or served via another server (e.g. 5500, 3000), default to http://localhost:8080.
-let BASE = localStorage.getItem('gc_backend_url');
-if (BASE === null) {
-  if (window.location.protocol === 'file:' || (window.location.port !== '8080' && window.location.hostname !== '')) {
+// 1. When served over HTTP/HTTPS (e.g. Render, Railway, cloud IP, or localhost),
+//    always use relative URL '' so requests go to the same origin serving the page.
+// 2. When opened as a local file (file://), default to http://localhost:8080.
+// 3. Prevent Mixed Content errors: never load http:// from an https:// page.
+let BASE = '';
+const urlParams = new URLSearchParams(window.location.search);
+const queryBackend = urlParams.get('backend');
+
+if (queryBackend) {
+  BASE = queryBackend.replace(/\/+$/, '');
+} else {
+  const saved = localStorage.getItem('gc_backend_url');
+  if (saved && !(window.location.protocol === 'https:' && saved.startsWith('http:'))) {
+    BASE = saved.replace(/\/+$/, '');
+  } else if (window.location.protocol === 'file:') {
     BASE = 'http://localhost:8080';
   } else {
+    // Default to same-origin relative URL for all remote/cloud hosts
     BASE = '';
   }
 }
@@ -1156,11 +1166,16 @@ function updateConnectionStatus(connected, info) {
 }
 
 function configureBackendUrl() {
-  const current = BASE || (window.location.origin.startsWith('http') ? window.location.origin : 'http://localhost:8080');
-  const input = prompt('Enter C++ Backend Server URL:', current);
+  const current = BASE || (window.location.protocol.startsWith('http') ? window.location.origin : 'http://localhost:8080');
+  const input = prompt('Enter C++ Backend Server URL (leave blank for same-origin):', current);
   if (input !== null) {
     BASE = input.trim().replace(/\/+$/, '');
-    localStorage.setItem('gc_backend_url', BASE);
+    if (BASE === window.location.origin) BASE = '';
+    if (BASE) {
+      localStorage.setItem('gc_backend_url', BASE);
+    } else {
+      localStorage.removeItem('gc_backend_url');
+    }
     updateConnectionStatus(false, 'Connecting...');
     fetchState();
   }
