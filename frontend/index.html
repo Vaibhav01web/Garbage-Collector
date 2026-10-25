@@ -1,0 +1,1747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Memory Compaction & GC Engine</title>
+<meta name="description" content="Interactive visualization of heap memory management, garbage collection, and LISP2 compaction algorithm powered by a C++ backend engine.">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ═══════════════════════════════════════════════════════════════
+   Design System — Dark theme with neon accents
+   ═══════════════════════════════════════════════════════════════ */
+:root {
+  --bg-primary:    #06080f;
+  --bg-secondary:  #0c1019;
+  --bg-card:       #111623;
+  --bg-card-hover: #161d2e;
+  --bg-input:      #0d1220;
+  --border:        rgba(99, 140, 255, 0.08);
+  --border-accent: rgba(99, 140, 255, 0.2);
+  --text-primary:  #e8ecf4;
+  --text-secondary:#8a94a8;
+  --text-muted:    #515b6e;
+  --accent-blue:   #638cff;
+  --accent-cyan:   #22d3ee;
+  --accent-green:  #34d399;
+  --accent-orange: #fb923c;
+  --accent-red:    #f87171;
+  --accent-purple: #a78bfa;
+  --accent-pink:   #f472b6;
+  --glow-blue:     0 0 20px rgba(99, 140, 255, 0.3);
+  --glow-cyan:     0 0 20px rgba(34, 211, 238, 0.3);
+  --glow-green:    0 0 20px rgba(52, 211, 153, 0.3);
+  --glow-red:      0 0 20px rgba(248, 113, 113, 0.3);
+  --radius:        12px;
+  --radius-sm:     8px;
+  --transition:    all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+*,*::before,*::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 14px; }
+
+body {
+  font-family: 'Inter', -apple-system, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  overflow-x: hidden;
+  line-height: 1.5;
+}
+
+/* Subtle animated grid background */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 600px 400px at 20% 20%, rgba(99, 140, 255, 0.04), transparent),
+    radial-gradient(ellipse 500px 300px at 80% 80%, rgba(167, 139, 250, 0.03), transparent);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ═══════════════ HEADER ═══════════════ */
+.header {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(6, 8, 15, 0.85);
+  backdrop-filter: blur(20px) saturate(1.5);
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  height: 64px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+
+.header-left { display: flex; align-items: center; gap: 14px; }
+
+.logo-icon {
+  width: 38px; height: 38px;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; font-weight: 800;
+  box-shadow: var(--glow-blue);
+  color: #fff;
+}
+
+.header h1 {
+  font-size: 1.15rem; font-weight: 700;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, var(--text-primary), var(--accent-blue));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+
+.header-subtitle {
+  font-size: 0.75rem; color: var(--text-muted);
+  font-weight: 400; margin-top: -2px;
+}
+
+.header-right { display: flex; align-items: center; gap: 12px; }
+
+.status-badge {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 12px; border-radius: 20px;
+  font-size: 0.72rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  background: rgba(52, 211, 153, 0.1);
+  color: var(--accent-green);
+  border: 1px solid rgba(52, 211, 153, 0.2);
+  cursor: pointer;
+  user-select: none;
+  transition: var(--transition);
+}
+
+.status-badge:hover {
+  filter: brightness(1.2);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.status-badge.disconnected {
+  background: rgba(248, 113, 113, 0.1);
+  color: var(--accent-red);
+  border-color: rgba(248, 113, 113, 0.25);
+}
+
+.status-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent-green);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.status-badge.disconnected .status-dot {
+  background: var(--accent-red);
+  animation: none;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.4); }
+  50%      { opacity: 0.7; box-shadow: 0 0 0 6px rgba(52, 211, 153, 0); }
+}
+
+/* ═══════════════ MAIN LAYOUT ═══════════════ */
+.app { padding: 20px 24px 40px; position: relative; z-index: 1; }
+
+.main-grid {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  grid-template-rows: auto auto auto;
+  gap: 16px;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+/* ═══════════════ CARDS ═══════════════ */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: var(--transition);
+}
+
+.card:hover { border-color: var(--border-accent); }
+
+.card-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255,255,255,0.01);
+}
+
+.card-title {
+  font-size: 0.78rem; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  display: flex; align-items: center; gap: 8px;
+}
+
+.card-title .icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-blue);
+  width: 18px;
+  height: 18px;
+}
+
+.card-title .icon svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+}
+
+.card-body { padding: 16px 18px; }
+
+/* ═══════════════ HEAP VISUALIZATION ═══════════════ */
+.heap-section { grid-column: 1 / 2; grid-row: 1 / 2; }
+
+.heap-grid {
+  display: grid;
+  grid-template-columns: repeat(64, 1fr);
+  gap: 1px;
+  background: rgba(0,0,0,0.3);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.heap-cell {
+  aspect-ratio: 1;
+  min-width: 0;
+  background: var(--bg-primary);
+  transition: background 0.3s ease, box-shadow 0.3s ease, transform 0.15s ease;
+  position: relative;
+  cursor: pointer;
+}
+
+.heap-cell:hover {
+  transform: scale(1.8);
+  z-index: 10;
+  border-radius: 2px;
+}
+
+.heap-cell.free { background: rgba(15, 20, 35, 0.8); }
+.heap-cell.free:hover { background: rgba(30, 40, 60, 0.9); }
+
+.heap-cell.occupied {
+  box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.08);
+}
+
+.heap-cell.marked {
+  animation: mark-pulse 1s ease-in-out infinite;
+}
+
+@keyframes mark-pulse {
+  0%, 100% { filter: brightness(1); }
+  50%      { filter: brightness(1.5); }
+}
+
+.heap-cell.compacting {
+  animation: compact-slide 0.6s ease-in-out;
+}
+
+@keyframes compact-slide {
+  0%   { transform: translateX(10px); opacity: 0.5; }
+  100% { transform: translateX(0);    opacity: 1; }
+}
+
+/* Heap info bar */
+.heap-info {
+  display: flex; gap: 20px; margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.heap-info-item {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 0.75rem; color: var(--text-secondary);
+}
+
+.heap-info-swatch {
+  width: 12px; height: 12px; border-radius: 3px;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+/* ═══════════════ CONTROLS PANEL ═══════════════ */
+.controls-section { grid-column: 2 / 3; grid-row: 1 / 3; }
+
+.control-group {
+  margin-bottom: 18px;
+}
+
+.control-group:last-child { margin-bottom: 0; }
+
+.control-label {
+  font-size: 0.7rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  display: block;
+}
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 9px 16px;
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.78rem; font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition);
+  white-space: nowrap;
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-icon svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+}
+
+.step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 0.65rem;
+  font-weight: 700;
+  margin-right: 4px;
+}
+
+.btn::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: linear-gradient(135deg, transparent, rgba(255,255,255,0.03));
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.btn:hover::before { opacity: 1; }
+.btn:hover { border-color: var(--accent-blue); transform: translateY(-1px); }
+.btn:active { transform: translateY(0); }
+
+.btn-primary {
+  background: linear-gradient(135deg, rgba(99, 140, 255, 0.15), rgba(99, 140, 255, 0.08));
+  border-color: rgba(99, 140, 255, 0.3);
+  color: var(--accent-blue);
+}
+.btn-primary:hover { box-shadow: var(--glow-blue); border-color: var(--accent-blue); }
+
+.btn-green {
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.12), rgba(52, 211, 153, 0.05));
+  border-color: rgba(52, 211, 153, 0.25);
+  color: var(--accent-green);
+}
+.btn-green:hover { box-shadow: var(--glow-green); border-color: var(--accent-green); }
+
+.btn-orange {
+  background: linear-gradient(135deg, rgba(251, 146, 60, 0.12), rgba(251, 146, 60, 0.05));
+  border-color: rgba(251, 146, 60, 0.25);
+  color: var(--accent-orange);
+}
+.btn-orange:hover { box-shadow: 0 0 20px rgba(251, 146, 60, 0.3); border-color: var(--accent-orange); }
+
+.btn-red {
+  background: linear-gradient(135deg, rgba(248, 113, 113, 0.12), rgba(248, 113, 113, 0.05));
+  border-color: rgba(248, 113, 113, 0.25);
+  color: var(--accent-red);
+}
+.btn-red:hover { box-shadow: var(--glow-red); border-color: var(--accent-red); }
+
+.btn-cyan {
+  background: linear-gradient(135deg, rgba(34, 211, 238, 0.12), rgba(34, 211, 238, 0.05));
+  border-color: rgba(34, 211, 238, 0.25);
+  color: var(--accent-cyan);
+}
+.btn-cyan:hover { box-shadow: var(--glow-cyan); border-color: var(--accent-cyan); }
+
+.btn-purple {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.12), rgba(167, 139, 250, 0.05));
+  border-color: rgba(167, 139, 250, 0.25);
+  color: var(--accent-purple);
+}
+.btn-purple:hover { box-shadow: 0 0 20px rgba(167, 139, 250, 0.3); border-color: var(--accent-purple); }
+
+.btn-group {
+  display: flex; flex-wrap: wrap; gap: 8px;
+}
+
+.btn-icon { font-size: 1rem; }
+
+/* Input fields */
+.input-row {
+  display: flex; gap: 8px; margin-bottom: 10px;
+}
+
+.input-field {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  outline: none;
+  transition: var(--transition);
+}
+
+.input-field:focus {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(99, 140, 255, 0.1);
+}
+
+.input-field::placeholder { color: var(--text-muted); }
+
+select.input-field {
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%238a94a8'%3E%3Cpath d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 28px;
+}
+
+.checkbox-row {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 10px;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: 16px; height: 16px;
+  accent-color: var(--accent-blue);
+  cursor: pointer;
+}
+
+.checkbox-row label {
+  font-size: 0.78rem; color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
+}
+
+/* ═══════════════ STATS SECTION ═══════════════ */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+
+.stat-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  transition: var(--transition);
+}
+
+.stat-card:hover { border-color: var(--border-accent); }
+
+.stat-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 1.4rem; font-weight: 700;
+  line-height: 1;
+  margin-bottom: 4px;
+}
+
+.stat-label {
+  font-size: 0.68rem; font-weight: 500;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.stat-value.blue   { color: var(--accent-blue); }
+.stat-value.green  { color: var(--accent-green); }
+.stat-value.orange { color: var(--accent-orange); }
+.stat-value.red    { color: var(--accent-red); }
+.stat-value.cyan   { color: var(--accent-cyan); }
+.stat-value.purple { color: var(--accent-purple); }
+
+/* Memory bar */
+.memory-bar-container {
+  margin-top: 14px;
+}
+
+.memory-bar-labels {
+  display: flex; justify-content: space-between;
+  font-size: 0.72rem; color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.memory-bar {
+  height: 28px;
+  background: var(--bg-primary);
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  display: flex;
+  position: relative;
+}
+
+.memory-bar-used {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+}
+
+.memory-bar-used::after {
+  content: '';
+  position: absolute; right: 0; top: 0; bottom: 0; width: 2px;
+  background: rgba(255,255,255,0.5);
+}
+
+.memory-bar-fragmented {
+  height: 100%;
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(251, 146, 60, 0.2),
+    rgba(251, 146, 60, 0.2) 4px,
+    rgba(251, 146, 60, 0.08) 4px,
+    rgba(251, 146, 60, 0.08) 8px
+  );
+  transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Fragmentation bar */
+.frag-bar-container { margin-top: 10px; }
+
+.frag-bar {
+  height: 8px;
+  background: var(--bg-primary);
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.frag-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.6s ease, background 0.4s ease;
+}
+
+/* ═══════════════ BOTTOM PANELS ═══════════════ */
+.bottom-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  grid-column: 1 / -1;
+}
+
+/* ═══════════════ BST VISUALIZATION ═══════════════ */
+.bst-canvas {
+  width: 100%;
+  height: 260px;
+  display: block;
+  border-radius: var(--radius-sm);
+}
+
+/* ═══════════════ OBJECT TABLE ═══════════════ */
+.obj-table-wrap {
+  max-height: 260px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(99,140,255,0.2) transparent;
+}
+
+.obj-table-wrap::-webkit-scrollbar { width: 5px; }
+.obj-table-wrap::-webkit-scrollbar-track { background: transparent; }
+.obj-table-wrap::-webkit-scrollbar-thumb { background: rgba(99,140,255,0.2); border-radius: 3px; }
+
+table.obj-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+
+table.obj-table th {
+  text-align: left;
+  padding: 8px 10px;
+  font-weight: 600; font-size: 0.68rem;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 0;
+  background: var(--bg-card);
+  z-index: 1;
+}
+
+table.obj-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.02);
+  color: var(--text-secondary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  vertical-align: middle;
+}
+
+table.obj-table tr:hover td {
+  background: rgba(99, 140, 255, 0.03);
+}
+
+.obj-color-dot {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 3px;
+  margin-right: 6px;
+  vertical-align: middle;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+.obj-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 600;
+}
+
+.obj-badge.root {
+  background: rgba(52, 211, 153, 0.12);
+  color: var(--accent-green);
+}
+
+.obj-badge.garbage {
+  background: rgba(248, 113, 113, 0.12);
+  color: var(--accent-red);
+}
+
+.obj-badge.marked {
+  background: rgba(34, 211, 238, 0.12);
+  color: var(--accent-cyan);
+}
+
+.obj-action-btn {
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.2);
+  color: var(--accent-red);
+  cursor: pointer;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 4px;
+  transition: var(--transition);
+}
+
+.obj-action-btn:hover {
+  background: rgba(248, 113, 113, 0.2);
+  border-color: var(--accent-red);
+}
+
+/* ═══════════════ LOG PANEL ═══════════════ */
+.log-section { grid-column: 1 / -1; }
+
+.log-body {
+  max-height: 200px;
+  overflow-y: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  line-height: 1.7;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(99,140,255,0.15) transparent;
+  padding: 12px 16px;
+}
+
+.log-body::-webkit-scrollbar { width: 5px; }
+.log-body::-webkit-scrollbar-track { background: transparent; }
+.log-body::-webkit-scrollbar-thumb { background: rgba(99,140,255,0.15); border-radius: 3px; }
+
+.log-entry {
+  padding: 2px 0;
+  color: var(--text-muted);
+  opacity: 0;
+  animation: log-fade-in 0.3s ease forwards;
+}
+
+@keyframes log-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.log-entry.gc-phase { color: var(--accent-cyan); font-weight: 600; }
+.log-entry.gc-header { color: var(--accent-purple); font-weight: 700; }
+.log-entry.alloc { color: var(--accent-green); }
+.log-entry.free  { color: var(--accent-orange); }
+.log-entry.error { color: var(--accent-red); }
+.log-entry.ref   { color: var(--text-secondary); }
+
+.log-timestamp {
+  color: var(--text-muted);
+  opacity: 0.5;
+  margin-right: 8px;
+}
+
+/* ═══════════════ REFERENCE GRAPH CANVAS ═══════════════ */
+.graph-canvas {
+  width: 100%;
+  height: 260px;
+  display: block;
+  border-radius: var(--radius-sm);
+}
+
+/* ═══════════════ TOOLTIP ═══════════════ */
+.tooltip {
+  position: fixed;
+  padding: 10px 14px;
+  background: rgba(12, 16, 30, 0.95);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-sm);
+  font-size: 0.72rem;
+  color: var(--text-primary);
+  pointer-events: none;
+  opacity: 0;
+  z-index: 1000;
+  transition: opacity 0.15s;
+  max-width: 250px;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+}
+
+.tooltip.show { opacity: 1; }
+
+.tooltip-title {
+  font-weight: 700; margin-bottom: 4px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.tooltip-row {
+  display: flex; justify-content: space-between; gap: 16px;
+  color: var(--text-secondary);
+  line-height: 1.8;
+}
+
+.tooltip-value {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-primary);
+}
+
+/* ═══════════════ NOTIFICATION TOAST ═══════════════ */
+.toast-container {
+  position: fixed; top: 80px; right: 24px;
+  z-index: 2000;
+  display: flex; flex-direction: column; gap: 8px;
+}
+
+.toast {
+  padding: 12px 18px;
+  border-radius: var(--radius-sm);
+  font-size: 0.78rem; font-weight: 500;
+  backdrop-filter: blur(12px);
+  border: 1px solid;
+  animation: toast-in 0.35s ease, toast-out 0.35s ease 2.8s forwards;
+  max-width: 360px;
+}
+
+@keyframes toast-in {
+  from { transform: translateX(100px); opacity: 0; }
+  to   { transform: translateX(0);     opacity: 1; }
+}
+@keyframes toast-out {
+  from { opacity: 1; }
+  to   { opacity: 0; transform: translateY(-8px); }
+}
+
+.toast.success {
+  background: rgba(52, 211, 153, 0.1);
+  border-color: rgba(52, 211, 153, 0.25);
+  color: var(--accent-green);
+}
+.toast.error {
+  background: rgba(248, 113, 113, 0.1);
+  border-color: rgba(248, 113, 113, 0.25);
+  color: var(--accent-red);
+}
+.toast.info {
+  background: rgba(99, 140, 255, 0.1);
+  border-color: rgba(99, 140, 255, 0.25);
+  color: var(--accent-blue);
+}
+.toast.warning {
+  background: rgba(251, 146, 60, 0.1);
+  border-color: rgba(251, 146, 60, 0.25);
+  color: var(--accent-orange);
+}
+
+/* ═══════════════ RESPONSIVE ═══════════════ */
+@media (max-width: 1100px) {
+  .main-grid {
+    grid-template-columns: 1fr;
+  }
+  .controls-section { grid-column: 1; grid-row: auto; }
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .bottom-grid { grid-template-columns: 1fr; }
+  .heap-grid { grid-template-columns: repeat(32, 1fr); }
+}
+</style>
+</head>
+<body>
+
+<!-- ════════════════ HEADER ════════════════ -->
+<header class="header">
+  <div class="header-left">
+    <div class="logo-icon">GC</div>
+    <div>
+      <h1>Memory Compaction & GC Engine</h1>
+      <div class="header-subtitle">LISP2 Mark-Sweep-Compact · C++ Backend</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <a href="/docs.pdf" target="_blank" class="btn" style="padding:5px 12px; font-size:0.72rem; text-decoration:none; color:var(--text-primary); border-color:var(--border-accent);">
+      <span class="btn-icon">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+      </span>
+      PDF Docs
+    </a>
+    <div class="status-badge" id="statusBadge" title="Click to view or edit Backend URL">
+      <span class="status-dot"></span>
+      <span id="statusText">Connecting...</span>
+    </div>
+  </div>
+</header>
+
+<!-- ════════════════ TOOLTIP ════════════════ -->
+<div class="tooltip" id="tooltip"></div>
+
+<!-- ════════════════ TOASTS ════════════════ -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- ════════════════ APP ════════════════ -->
+<main class="app">
+  <div class="main-grid">
+
+    <!-- ──── HEAP VISUALIZATION ──── -->
+    <section class="card heap-section">
+      <div class="card-header">
+        <div class="card-title">
+          <span class="icon">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
+          </span>
+          Heap Memory
+          <span style="font-weight:400; text-transform:none; letter-spacing:0; font-size:0.72rem; color:var(--text-muted)">
+            — 512 bytes · 64 × 8 grid
+          </span>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center;">
+          <span class="card-title" style="font-size:0.7rem;" id="heapUsageLabel">0 / 512 B</span>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="heap-grid" id="heapGrid"></div>
+        <div class="heap-info">
+          <div class="heap-info-item">
+            <div class="heap-info-swatch" style="background:rgba(15,20,35,0.8)"></div> Free
+          </div>
+          <div class="heap-info-item">
+            <div class="heap-info-swatch" style="background:var(--accent-blue)"></div> Occupied
+          </div>
+          <div class="heap-info-item">
+            <div class="heap-info-swatch" style="background:var(--accent-cyan); box-shadow: 0 0 6px var(--accent-cyan)"></div> Marked
+          </div>
+          <div class="heap-info-item">
+            <div class="heap-info-swatch" style="background:repeating-linear-gradient(-45deg, rgba(248,113,113,0.5), rgba(248,113,113,0.5) 2px, transparent 2px, transparent 4px)"></div> Garbage
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ──── CONTROLS ──── -->
+    <section class="card controls-section">
+      <div class="card-header">
+        <div class="card-title">
+          <span class="icon">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+          </span>
+          Controls
+        </div>
+      </div>
+      <div class="card-body">
+
+        <!-- Allocation -->
+        <div class="control-group">
+          <span class="control-label">Allocate Object</span>
+          <div class="input-row">
+            <select class="input-field" id="allocType">
+              <option>String</option><option>Array</option><option>HashMap</option>
+              <option>Buffer</option><option>Closure</option><option>Promise</option>
+              <option>Vector</option><option>RegExp</option><option>WeakMap</option>
+              <option>Symbol</option><option>Iterator</option><option>Set</option>
+              <option>Proxy</option><option>TypedArray</option><option>DataView</option>
+            </select>
+            <input class="input-field" type="number" id="allocSize" value="24" min="4" max="128" placeholder="Size (B)">
+          </div>
+          <div class="checkbox-row">
+            <input type="checkbox" id="allocRoot" checked>
+            <label for="allocRoot">Root reference</label>
+          </div>
+          <div class="checkbox-row">
+            <input type="checkbox" id="allocGC">
+            <label for="allocGC">Auto-GC on failure</label>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-primary" id="btnAllocate" onclick="doAllocate()">
+              <span class="btn-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </span>
+              Allocate
+            </button>
+            <button class="btn btn-green" onclick="doRandom()">
+              <span class="btn-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+              </span>
+              Random ×5
+            </button>
+          </div>
+        </div>
+
+        <hr class="divider">
+
+        <!-- GC Controls -->
+        <div class="control-group">
+          <span class="control-label">Garbage Collection</span>
+          <div class="btn-group">
+            <button class="btn btn-cyan" onclick="doGC('full')">
+              <span class="btn-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              </span>
+              Full GC
+            </button>
+          </div>
+          <div class="btn-group" style="margin-top:8px">
+            <button class="btn" onclick="doGC('mark')"><span class="step-num">1</span> Mark</button>
+            <button class="btn" onclick="doGC('sweep')"><span class="step-num">2</span> Sweep</button>
+            <button class="btn" onclick="doGC('compact')"><span class="step-num">3</span> Compact</button>
+          </div>
+        </div>
+
+        <hr class="divider">
+
+        <!-- Scenarios -->
+        <div class="control-group">
+          <span class="control-label">Scenarios</span>
+          <div class="btn-group">
+            <button class="btn btn-purple" onclick="doDemo()">
+              <span class="btn-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+              </span>
+              Fragmentation Demo
+            </button>
+          </div>
+          <div class="btn-group" style="margin-top:8px">
+            <button class="btn btn-red" onclick="doReset()">
+              <span class="btn-icon">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              </span>
+              Reset Heap
+            </button>
+          </div>
+        </div>
+
+        <hr class="divider">
+
+        <!-- Reference add -->
+        <div class="control-group">
+          <span class="control-label">Add Reference</span>
+          <div class="input-row">
+            <input class="input-field" type="number" id="refFrom" placeholder="From ID" min="1">
+            <input class="input-field" type="number" id="refTo" placeholder="To ID" min="1">
+          </div>
+          <button class="btn btn-orange" onclick="doAddRef()">
+            <span class="btn-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+            </span>
+            Link
+          </button>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ──── STATS ──── -->
+    <section class="card" style="grid-column: 1 / 2;">
+      <div class="card-header">
+        <div class="card-title">
+          <span class="icon">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          </span>
+          Memory Statistics
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-value blue" id="statLive">0</div>
+            <div class="stat-label">Live Objects</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value green" id="statUsed">0 B</div>
+            <div class="stat-label">Used Memory</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value orange" id="statFrag">0%</div>
+            <div class="stat-label">Fragmentation</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value cyan" id="statLargest">0 B</div>
+            <div class="stat-label">Largest Free Block</div>
+          </div>
+        </div>
+
+        <div class="memory-bar-container">
+          <div class="memory-bar-labels">
+            <span>Memory Usage</span>
+            <span id="memPercent">0%</span>
+          </div>
+          <div class="memory-bar">
+            <div class="memory-bar-used" id="memBarUsed" style="width:0%"></div>
+          </div>
+        </div>
+
+        <div class="frag-bar-container">
+          <div class="memory-bar-labels">
+            <span>Fragmentation Index</span>
+            <span id="fragPercent">0%</span>
+          </div>
+          <div class="frag-bar">
+            <div class="frag-bar-fill" id="fragBarFill" style="width:0%"></div>
+          </div>
+        </div>
+
+        <div class="stats-grid" style="margin-top:14px;">
+          <div class="stat-card">
+            <div class="stat-value purple" id="statAllocs">0</div>
+            <div class="stat-label">Total Allocs</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value cyan" id="statGCs">0</div>
+            <div class="stat-label">GC Cycles</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value orange" id="statCompacts">0</div>
+            <div class="stat-label">Compactions</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value red" id="statFreed">0 B</div>
+            <div class="stat-label">Bytes Freed</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ──── BOTTOM: BST + Objects ──── -->
+    <div class="bottom-grid">
+
+      <!-- BST Viz -->
+      <section class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="3"/><circle cx="6" cy="19" r="3"/><circle cx="18" cy="19" r="3"/><path d="M12 8v4M12 12l-6 4M12 12l6 4"/></svg>
+            </span>
+            BST — Live Objects (by offset)
+          </div>
+        </div>
+        <div class="card-body" style="padding:8px;">
+          <canvas class="bst-canvas" id="bstCanvas"></canvas>
+        </div>
+      </section>
+
+      <!-- Object Reference Graph -->
+      <section class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="icon">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+            </span>
+            Object Reference Graph
+          </div>
+        </div>
+        <div class="card-body" style="padding:8px;">
+          <canvas class="graph-canvas" id="graphCanvas"></canvas>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- ──── Object Table ──── -->
+    <section class="card" style="grid-column: 1 / -1;">
+      <div class="card-header">
+        <div class="card-title">
+          <span class="icon">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+          </span>
+          Object Table
+        </div>
+        <span style="font-size:0.72rem; color:var(--text-muted)" id="objCount">0 objects</span>
+      </div>
+      <div class="card-body" style="padding:0;">
+        <div class="obj-table-wrap">
+          <table class="obj-table" id="objTable">
+            <thead>
+              <tr>
+                <th></th><th>ID</th><th>Type</th><th>Offset</th><th>Size</th>
+                <th>Status</th><th>References</th><th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="objTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ──── LOG ──── -->
+    <section class="card log-section">
+      <div class="card-header">
+        <div class="card-title">
+          <span class="icon">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          </span>
+          Engine Log
+        </div>
+        <button class="btn" style="padding:4px 10px; font-size:0.7rem;" onclick="clearLog()">Clear</button>
+      </div>
+      <div class="log-body" id="logBody"></div>
+    </section>
+
+  </div>
+</main>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════
+//  State & Backend Connection
+// ═══════════════════════════════════════════════════════════════════
+
+let state = null;
+let prevCells = null;
+
+// Determine backend base URL:
+// - If user saved a custom URL in localStorage, use it.
+// - If page is served from http://localhost:8080 (the C++ server), use '' (relative path).
+// - If page is opened directly as file:// or served via another server (e.g. 5500, 3000), default to http://localhost:8080.
+let BASE = localStorage.getItem('gc_backend_url');
+if (BASE === null) {
+  if (window.location.protocol === 'file:' || (window.location.port !== '8080' && window.location.hostname !== '')) {
+    BASE = 'http://localhost:8080';
+  } else {
+    BASE = '';
+  }
+}
+
+function updateConnectionStatus(connected, info) {
+  const badge = document.getElementById('statusBadge');
+  const text = document.getElementById('statusText');
+  if (!badge || !text) return;
+  if (connected) {
+    badge.classList.remove('disconnected');
+    text.textContent = info || 'Connected (C++)';
+  } else {
+    badge.classList.add('disconnected');
+    text.textContent = info || 'Disconnected';
+  }
+}
+
+function configureBackendUrl() {
+  const current = BASE || (window.location.origin.startsWith('http') ? window.location.origin : 'http://localhost:8080');
+  const input = prompt('Enter C++ Backend Server URL:', current);
+  if (input !== null) {
+    BASE = input.trim().replace(/\/+$/, '');
+    localStorage.setItem('gc_backend_url', BASE);
+    updateConnectionStatus(false, 'Connecting...');
+    fetchState();
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Color generation (golden-angle based hue distribution)
+// ═══════════════════════════════════════════════════════════════════
+
+function objColor(id) {
+  const hue = (id * 137.508) % 360;
+  return `hsl(${hue}, 65%, 52%)`;
+}
+
+function objColorDim(id) {
+  const hue = (id * 137.508) % 360;
+  return `hsl(${hue}, 50%, 28%)`;
+}
+
+function objColorGlow(id) {
+  const hue = (id * 137.508) % 360;
+  return `hsla(${hue}, 70%, 55%, 0.5)`;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  API
+// ═══════════════════════════════════════════════════════════════════
+
+async function api(method, path, body) {
+  try {
+    const opts = { method };
+    if (body) {
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = JSON.stringify(body);
+    }
+    const targetUrl = (BASE || '') + path;
+    const res = await fetch(targetUrl, opts);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    updateConnectionStatus(true, 'Connected (C++)');
+    return data;
+  } catch (e) {
+    updateConnectionStatus(false, 'Disconnected');
+    showToast('Backend connection error: ' + e.message, 'error');
+    return null;
+  }
+}
+
+async function fetchState() {
+  const s = await api('GET', '/api/state');
+  if (s) { state = s; render(); }
+}
+
+async function doAllocate() {
+  const name = document.getElementById('allocType').value;
+  const size = parseInt(document.getElementById('allocSize').value) || 24;
+  const is_root = document.getElementById('allocRoot').checked;
+  const with_gc = document.getElementById('allocGC').checked;
+  const res = await api('POST', '/api/allocate', { name, size, is_root, with_gc });
+  if (res) {
+    if (res.success) {
+      showToast(`Allocated ${name} (${size}B) → id=${res.id}`, 'success');
+    } else {
+      showToast(`Allocation failed! Total free: ${res.total_free}B, Largest gap: ${res.largest_free}B`, 'error');
+    }
+  }
+  fetchState();
+}
+
+async function doRandom() {
+  await api('POST', '/api/random', { count: 5 });
+  showToast('Added 5 random objects', 'info');
+  fetchState();
+}
+
+async function doGC(phase) {
+  const labels = { full: 'Full GC', mark: 'Mark Phase', sweep: 'Sweep Phase', compact: 'Compact Phase' };
+  showToast(`Running ${labels[phase]}…`, 'info');
+  await api('POST', '/api/gc', { phase });
+  fetchState();
+}
+
+async function doDemo() {
+  await api('POST', '/api/demo');
+  showToast('Fragmentation demo loaded!', 'warning');
+  fetchState();
+}
+
+async function doReset() {
+  await api('POST', '/api/reset');
+  showToast('Heap reset', 'info');
+  fetchState();
+}
+
+async function doAddRef() {
+  const from = parseInt(document.getElementById('refFrom').value);
+  const to = parseInt(document.getElementById('refTo').value);
+  if (!from || !to) return showToast('Enter valid IDs', 'error');
+  const res = await api('POST', '/api/reference', { from, to });
+  if (res && res.success) showToast(`Reference ${from} → ${to}`, 'success');
+  else showToast('Failed to add reference', 'error');
+  fetchState();
+}
+
+async function doRemoveRoot(id) {
+  await api('POST', '/api/remove-root', { id });
+  showToast(`Removed root for object ${id}`, 'warning');
+  fetchState();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Rendering
+// ═══════════════════════════════════════════════════════════════════
+
+function render() {
+  if (!state) return;
+  renderHeap();
+  renderStats();
+  renderObjects();
+  renderBST();
+  renderGraph();
+  renderLog();
+}
+
+// ──── Heap Grid ────
+function renderHeap() {
+  const grid = document.getElementById('heapGrid');
+  const cells = state.heap.cells;
+
+  // Build object lookup
+  const objMap = {};
+  state.objects.forEach(o => { objMap[o.id] = o; });
+
+  // Only rebuild DOM if cell count changed
+  if (grid.children.length !== cells.length) {
+    grid.innerHTML = '';
+    for (let i = 0; i < cells.length; i++) {
+      const el = document.createElement('div');
+      el.className = 'heap-cell';
+      el.dataset.idx = i;
+      el.addEventListener('mouseenter', (e) => showHeapTooltip(e, i));
+      el.addEventListener('mouseleave', hideTooltip);
+      grid.appendChild(el);
+    }
+  }
+
+  for (let i = 0; i < cells.length; i++) {
+    const el = grid.children[i];
+    const val = cells[i];
+    const prevVal = prevCells ? prevCells[i] : 0;
+
+    if (val === 0) {
+      el.className = 'heap-cell free';
+      el.style.background = '';
+      el.style.boxShadow = '';
+    } else {
+      const obj = objMap[val];
+      const color = objColor(val);
+      let cls = 'heap-cell occupied';
+      if (obj && obj.marked) cls += ' marked';
+      if (prevVal !== val && prevVal === 0 && val !== 0) cls += ' compacting';
+      el.className = cls;
+      el.style.background = color;
+      el.style.boxShadow = obj && obj.marked ? `0 0 8px ${objColorGlow(val)}` : '';
+    }
+  }
+
+  prevCells = [...cells];
+  document.getElementById('heapUsageLabel').textContent =
+    `${state.heap.used} / ${state.heap.size} B`;
+}
+
+function showHeapTooltip(e, idx) {
+  if (!state) return;
+  const val = state.heap.cells[idx];
+  const tip = document.getElementById('tooltip');
+
+  if (val === 0) {
+    tip.innerHTML = `
+      <div class="tooltip-title" style="color:var(--text-muted)">Free Space</div>
+      <div class="tooltip-row"><span>Address</span><span class="tooltip-value">0x${idx.toString(16).padStart(3,'0')}</span></div>
+      <div class="tooltip-row"><span>Byte Index</span><span class="tooltip-value">${idx}</span></div>
+    `;
+  } else {
+    const obj = state.objects.find(o => o.id === val);
+    if (obj) {
+      tip.innerHTML = `
+        <div class="tooltip-title" style="color:${objColor(val)}">${obj.type}[${obj.id}]</div>
+        <div class="tooltip-row"><span>Offset</span><span class="tooltip-value">0x${obj.offset.toString(16).padStart(3,'0')}</span></div>
+        <div class="tooltip-row"><span>Size</span><span class="tooltip-value">${obj.size} bytes</span></div>
+        <div class="tooltip-row"><span>Root</span><span class="tooltip-value">${obj.is_root ? 'Yes' : 'No'}</span></div>
+        <div class="tooltip-row"><span>Marked</span><span class="tooltip-value">${obj.marked ? 'Yes' : 'No'}</span></div>
+        ${obj.references.length ? `<div class="tooltip-row"><span>Refs</span><span class="tooltip-value">→ [${obj.references.join(', ')}]</span></div>` : ''}
+      `;
+    }
+  }
+
+  tip.style.left = (e.clientX + 16) + 'px';
+  tip.style.top = (e.clientY - 10) + 'px';
+  tip.classList.add('show');
+}
+
+function hideTooltip() {
+  document.getElementById('tooltip').classList.remove('show');
+}
+
+// ──── Stats ────
+function renderStats() {
+  const h = state.heap;
+  const s = state.stats;
+
+  document.getElementById('statLive').textContent = s.live_objects;
+  document.getElementById('statUsed').textContent = h.used + ' B';
+  document.getElementById('statFrag').textContent = (h.fragmentation * 100).toFixed(1) + '%';
+  document.getElementById('statLargest').textContent = h.largest_free + ' B';
+  document.getElementById('statAllocs').textContent = s.total_allocations;
+  document.getElementById('statGCs').textContent = s.total_collections;
+  document.getElementById('statCompacts').textContent = s.total_compactions;
+  document.getElementById('statFreed').textContent = s.bytes_freed + ' B';
+
+  const usedPct = (h.used / h.size * 100);
+  document.getElementById('memBarUsed').style.width = usedPct + '%';
+  document.getElementById('memPercent').textContent = usedPct.toFixed(1) + '%';
+
+  const fragPct = h.fragmentation * 100;
+  const fragBar = document.getElementById('fragBarFill');
+  fragBar.style.width = fragPct + '%';
+
+  // Color fragmentation bar based on severity
+  if (fragPct < 25) fragBar.style.background = 'var(--accent-green)';
+  else if (fragPct < 50) fragBar.style.background = 'var(--accent-cyan)';
+  else if (fragPct < 75) fragBar.style.background = 'var(--accent-orange)';
+  else fragBar.style.background = 'var(--accent-red)';
+
+  document.getElementById('fragPercent').textContent = fragPct.toFixed(1) + '%';
+}
+
+// ──── Object Table ────
+function renderObjects() {
+  const tbody = document.getElementById('objTableBody');
+  const objs = state.objects;
+  document.getElementById('objCount').textContent = objs.length + ' objects';
+
+  tbody.innerHTML = objs.map(o => {
+    const color = objColor(o.id);
+    let statusBadges = '';
+    if (o.is_root) statusBadges += '<span class="obj-badge root">ROOT</span> ';
+    if (o.marked) statusBadges += '<span class="obj-badge marked">MARKED</span> ';
+    if (!o.is_root && !o.marked) {
+      // Check if referenced by anyone
+      const isReferenced = objs.some(other => other.references.includes(o.id));
+      if (!isReferenced) statusBadges += '<span class="obj-badge garbage">GARBAGE</span>';
+    }
+
+    const refs = o.references.length
+      ? o.references.map(r => `<span style="color:${objColor(r)}">${r}</span>`).join(', ')
+      : '<span style="color:var(--text-muted)">—</span>';
+
+    return `<tr>
+      <td><span class="obj-color-dot" style="background:${color}"></span></td>
+      <td style="color:${color}; font-weight:600">${o.id}</td>
+      <td style="color:var(--text-primary)">${o.type}</td>
+      <td>0x${o.offset.toString(16).padStart(3,'0')}</td>
+      <td>${o.size} B</td>
+      <td>${statusBadges}</td>
+      <td>${refs}</td>
+      <td>
+        ${o.is_root ? `<button class="obj-action-btn" title="Remove root" onclick="doRemoveRoot(${o.id})">Unroot</button>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// ──── BST Visualization (Canvas) ────
+function renderBST() {
+  const canvas = document.getElementById('bstCanvas');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+
+  canvas.width = canvas.clientWidth * dpr;
+  canvas.height = canvas.clientHeight * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+
+  const W = canvas.clientWidth;
+  const H = canvas.clientHeight;
+
+  if (!state.bst) {
+    ctx.fillStyle = '#515b6e';
+    ctx.font = '13px Inter';
+    ctx.textAlign = 'center';
+    ctx.fillText('No objects allocated', W / 2, H / 2);
+    return;
+  }
+
+  // Calculate tree depth
+  function depth(node) {
+    if (!node) return 0;
+    return 1 + Math.max(depth(node.left), depth(node.right));
+  }
+
+  const maxDepth = depth(state.bst);
+  const nodeR = Math.max(12, Math.min(22, W / (Math.pow(2, maxDepth) * 3)));
+  const levelH = Math.max(36, (H - 30) / Math.max(maxDepth, 1));
+
+  function drawNode(node, x, y, spread) {
+    if (!node) return;
+
+    const obj = state.objects.find(o => o.id === node.id);
+    const color = objColor(node.id);
+
+    // Draw edges first
+    if (node.left) {
+      const childX = x - spread;
+      const childY = y + levelH;
+      ctx.beginPath();
+      ctx.moveTo(x, y + nodeR);
+      ctx.lineTo(childX, childY - nodeR);
+      ctx.strokeStyle = 'rgba(99, 140, 255, 0.15)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      drawNode(node.left, childX, childY, spread / 2);
+    }
+
+    if (node.right) {
+      const childX = x + spread;
+      const childY = y + levelH;
+      ctx.beginPath();
+      ctx.moveTo(x, y + nodeR);
+      ctx.lineTo(childX, childY - nodeR);
+      ctx.strokeStyle = 'rgba(99, 140, 255, 0.15)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      drawNode(node.right, childX, childY, spread / 2);
+    }
+
+    // Draw node circle
+    ctx.beginPath();
+    ctx.arc(x, y, nodeR, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.15;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Glow if marked
+    if (obj && obj.marked) {
+      ctx.beginPath();
+      ctx.arc(x, y, nodeR + 4, 0, Math.PI * 2);
+      ctx.strokeStyle = objColorGlow(node.id);
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    }
+
+    // Node label (object ID)
+    ctx.fillStyle = color;
+    ctx.font = `bold ${Math.max(9, nodeR * 0.7)}px JetBrains Mono`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(node.id.toString(), x, y);
+
+    // Offset label below
+    ctx.fillStyle = '#515b6e';
+    ctx.font = `${Math.max(8, nodeR * 0.5)}px JetBrains Mono`;
+    ctx.fillText('0x' + node.key.toString(16), x, y + nodeR + 10);
+  }
+
+  const startSpread = W / 4;
+  drawNode(state.bst, W / 2, 25 + nodeR, startSpread);
+}
+
+// ──── Reference Graph (Canvas) ────
+function renderGraph() {
+  const canvas = document.getElementById('graphCanvas');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+
+  canvas.width = canvas.clientWidth * dpr;
+  canvas.height = canvas.clientHeight * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+
+  const W = canvas.clientWidth;
+  const H = canvas.clientHeight;
+  const objs = state.objects;
+
+  if (objs.length === 0) {
+    ctx.fillStyle = '#515b6e';
+    ctx.font = '13px Inter';
+    ctx.textAlign = 'center';
+    ctx.fillText('No objects to display', W / 2, H / 2);
+    return;
+  }
+
+  // Layout: arrange objects in a circle or grid
+  const positions = {};
+  const n = objs.length;
+  const cx = W / 2;
+  const cy = H / 2;
+  const radius = Math.min(W, H) * 0.35;
+
+  objs.forEach((o, i) => {
+    const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
+    positions[o.id] = {
+      x: cx + radius * Math.cos(angle),
+      y: cy + radius * Math.sin(angle)
+    };
+  });
+
+  // Draw edges (references)
+  objs.forEach(o => {
+    const from = positions[o.id];
+    if (!from) return;
+    o.references.forEach(refId => {
+      const to = positions[refId];
+      if (!to) return;
+
+      // Arrow
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist === 0) return;
+
+      const nodeR = 18;
+      const startX = from.x + (dx / dist) * nodeR;
+      const startY = from.y + (dy / dist) * nodeR;
+      const endX = to.x - (dx / dist) * (nodeR + 6);
+      const endY = to.y - (dy / dist) * (nodeR + 6);
+
+      // Line
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.lineTo(endX, endY);
+      ctx.strokeStyle = 'rgba(99, 140, 255, 0.2)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      // Arrowhead
+      const headLen = 8;
+      const angle = Math.atan2(endY - startY, endX - startX);
+      ctx.beginPath();
+      ctx.moveTo(endX, endY);
+      ctx.lineTo(endX - headLen * Math.cos(angle - 0.4), endY - headLen * Math.sin(angle - 0.4));
+      ctx.lineTo(endX - headLen * Math.cos(angle + 0.4), endY - headLen * Math.sin(angle + 0.4));
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(99, 140, 255, 0.4)';
+      ctx.fill();
+    });
+  });
+
+  // Draw nodes
+  objs.forEach(o => {
+    const pos = positions[o.id];
+    if (!pos) return;
+    const color = objColor(o.id);
+    const nodeR = 18;
+
+    // Outer glow for roots
+    if (o.is_root) {
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, nodeR + 5, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(52, 211, 153, 0.25)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 3]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Node
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, nodeR, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.12;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // ID label
+    ctx.fillStyle = color;
+    ctx.font = 'bold 11px JetBrains Mono';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(o.id.toString(), pos.x, pos.y);
+
+    // Type label below
+    ctx.fillStyle = '#8a94a8';
+    ctx.font = '9px Inter';
+    ctx.fillText(o.type, pos.x, pos.y + nodeR + 12);
+  });
+}
+
+// ──── Log ────
+let logIndex = 0;
+function renderLog() {
+  const body = document.getElementById('logBody');
+  const logs = state.log;
+
+  // Only append new entries
+  if (logs.length < logIndex) {
+    body.innerHTML = '';
+    logIndex = 0;
+  }
+
+  for (let i = logIndex; i < logs.length; i++) {
+    const entry = document.createElement('div');
+    let cls = 'log-entry';
+    const text = logs[i];
+
+    if (text.startsWith('═══')) cls += ' gc-header';
+    else if (text.includes('Mark phase') || text.includes('Sweep phase') || text.includes('Compact')) cls += ' gc-phase';
+    else if (text.startsWith('Allocated')) cls += ' alloc';
+    else if (text.includes('freed') || text.includes('Removed root')) cls += ' free';
+    else if (text.startsWith('!') || text.startsWith('Failed') || text.toLowerCase().includes('failed') || text.toLowerCase().includes('error')) cls += ' error';
+    else if (text.startsWith('Reference:')) cls += ' ref';
+
+    entry.className = cls;
+    entry.innerHTML = `<span class="log-timestamp">${String(i).padStart(3, '0')}</span>${escapeHtml(text)}`;
+    body.appendChild(entry);
+  }
+
+  logIndex = logs.length;
+  body.scrollTop = body.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('logBody').innerHTML = '';
+  logIndex = 0;
+}
+
+function escapeHtml(text) {
+  const d = document.createElement('div');
+  d.textContent = text;
+  return d.innerHTML;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Toast Notifications
+// ═══════════════════════════════════════════════════════════════════
+
+function showToast(msg, type = 'info') {
+  const container = document.getElementById('toastContainer');
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.textContent = msg;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), 3200);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Canvas resize handler
+// ═══════════════════════════════════════════════════════════════════
+
+function handleResize() {
+  if (state) {
+    renderBST();
+    renderGraph();
+  }
+}
+
+window.addEventListener('resize', handleResize);
+
+// ═══════════════════════════════════════════════════════════════════
+//  Init
+// ═══════════════════════════════════════════════════════════════════
+
+document.addEventListener('DOMContentLoaded', () => {
+  const badge = document.getElementById('statusBadge');
+  if (badge) badge.addEventListener('click', configureBackendUrl);
+  fetchState();
+  // Auto-sync state with C++ backend periodically & maintain live connection
+  setInterval(() => {
+    fetchState();
+  }, 2500);
+});
+</script>
+
+</body>
+</html>

@@ -1,0 +1,21 @@
+# Compiled binaries & objects
+gc_engine
+*.o
+*.so
+*.dylib
+
+# System & editor files
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Python cache & venv
+__pycache__/
+*.pyc
+venv/
+.env
+
+# Logs
+*.log
