@@ -22,6 +22,8 @@
 #include <cstdint>
 #include <algorithm>
 #include <cctype>
+#include <sys/types.h>
+#include <sys/time.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -310,9 +312,14 @@ inline int json_int(const std::string& json, const std::string& key) {
     pos += needle.size();
     while (pos < json.size() && (json[pos] == ' ' || json[pos] == ':' || json[pos] == '"')) pos++;
     std::string num;
-    while (pos < json.size() && (isdigit(json[pos]) || json[pos] == '-'))
+    while (pos < json.size() && (std::isdigit(static_cast<unsigned char>(json[pos])) || json[pos] == '-'))
         num += json[pos++];
-    return num.empty() ? -1 : std::stoi(num);
+    if (num.empty()) return -1;
+    try {
+        return std::stoi(num);
+    } catch (...) {
+        return -1;
+    }
 }
 
 inline bool json_bool(const std::string& json, const std::string& key) {
