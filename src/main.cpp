@@ -90,7 +90,7 @@ int main(int argc, char *argv[]) {
     bool with_gc = json_bool(req.body, "with_gc");
 
     if (size <= 0)
-      return HttpResponse::error(400, "Invalid size");
+      size = 24;
     if (name.empty())
       name = "Object";
 

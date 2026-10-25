@@ -20,6 +20,8 @@
 #include <iostream>
 #include <cstring>
 #include <cstdint>
+#include <algorithm>
+#include <cctype>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -32,6 +34,7 @@ struct HttpRequest {
     std::string method;
     std::string path;
     std::string body;
+    int content_length = 0;
     std::map<std::string, std::string> headers;
 };
 
@@ -176,13 +179,27 @@ private:
     std::map<std::string, RouteHandler> post_routes;
 
     void handle_client(int fd) {
-        // Read up to 64 KB
+        struct timeval tv;
+        tv.tv_sec = 2;
+        tv.tv_usec = 0;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+
+        std::string raw;
         char buf[65536];
         ssize_t n = read(fd, buf, sizeof(buf) - 1);
         if (n <= 0) return;
-        buf[n] = '\0';
+        raw.append(buf, (size_t)n);
 
-        HttpRequest req = parse(std::string(buf, (size_t)n));
+        HttpRequest req = parse(raw);
+
+        // If client specified content-length and not all body bytes have arrived in the first packet
+        if (req.content_length > 0 && (int)req.body.size() < req.content_length) {
+            while ((int)req.body.size() < req.content_length) {
+                ssize_t more = read(fd, buf, sizeof(buf) - 1);
+                if (more <= 0) break;
+                req.body.append(buf, (size_t)more);
+            }
+        }
 
         // CORS preflight
         if (req.method == "OPTIONS") {
@@ -231,26 +248,39 @@ private:
         }
 
         // Headers
-        int content_length = 0;
+        req.content_length = 0;
         while (std::getline(ss, line)) {
             if (line == "\r" || line.empty()) break;
             size_t colon = line.find(':');
             if (colon != std::string::npos) {
                 std::string key = line.substr(0, colon);
                 std::string val = line.substr(colon + 1);
-                // Trim leading space and trailing \r
                 while (!val.empty() && val.front() == ' ') val.erase(val.begin());
-                while (!val.empty() && val.back() == '\r')  val.pop_back();
-                req.headers[key] = val;
-                if (key == "Content-Length") content_length = std::stoi(val);
+                while (!val.empty() && val.back() == '\r') val.pop_back();
+
+                // Store case-insensitively (lowercase)
+                std::string lower_key = key;
+                std::transform(lower_key.begin(), lower_key.end(), lower_key.begin(), ::tolower);
+                req.headers[lower_key] = val;
+
+                if (lower_key == "content-length") {
+                    try {
+                        req.content_length = std::stoi(val);
+                    } catch (...) {
+                        req.content_length = 0;
+                    }
+                }
             }
         }
 
-        // Body
-        if (content_length > 0) {
-            size_t body_start = raw.find("\r\n\r\n");
+        // Body: check \r\n\r\n or \n\n
+        size_t body_start = raw.find("\r\n\r\n");
+        if (body_start != std::string::npos) {
+            req.body = raw.substr(body_start + 4);
+        } else {
+            body_start = raw.find("\n\n");
             if (body_start != std::string::npos)
-                req.body = raw.substr(body_start + 4);
+                req.body = raw.substr(body_start + 2);
         }
 
         return req;
@@ -278,7 +308,7 @@ inline int json_int(const std::string& json, const std::string& key) {
     size_t pos = json.find(needle);
     if (pos == std::string::npos) return -1;
     pos += needle.size();
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == ':')) pos++;
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == ':' || json[pos] == '"')) pos++;
     std::string num;
     while (pos < json.size() && (isdigit(json[pos]) || json[pos] == '-'))
         num += json[pos++];
